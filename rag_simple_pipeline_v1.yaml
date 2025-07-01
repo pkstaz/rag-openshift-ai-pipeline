@@ -1,0 +1,173 @@
+# PIPELINE DEFINITION
+# Name: rag-simple-test-v1
+# Description: Pipeline RAG simplificado para testing - Carlos Estay (pkstaz)
+# Inputs:
+#    bucket_name: str [Default: 'raw-documents']
+#    es_endpoint: str [Default: 'elasticsearch:9200']
+#    object_key: str [Default: 'test.txt']
+# Outputs:
+#    Output: dict
+components:
+  comp-simple-extract-component:
+    executorLabel: exec-simple-extract-component
+    inputDefinitions:
+      parameters:
+        bucket_name:
+          parameterType: STRING
+        object_key:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-simple-index-component:
+    executorLabel: exec-simple-index-component
+    inputDefinitions:
+      parameters:
+        es_endpoint:
+          parameterType: STRING
+        extracted_text:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRUCT
+deploymentSpec:
+  executors:
+    exec-simple-extract-component:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - simple_extract_component
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.12.1'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'PyPDF2==3.0.1'\
+          \ 'minio==7.1.17' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef simple_extract_component(\n    bucket_name: str,\n    object_key:\
+          \ str\n) -> str:\n    \"\"\"Component simplificado para testing - retorna\
+          \ string\"\"\"\n\n    # Simular extracci\xF3n\n    test_content = f\"Contenido\
+          \ extra\xEDdo de {object_key} en bucket {bucket_name}\"\n\n    print(f\"\
+          \u2705 Texto extra\xEDdo: {len(test_content)} caracteres\")\n\n    return\
+          \ test_content\n\n"
+        image: pytorch/pytorch:2.0.1-cuda11.7-cudnn8-devel
+        resources:
+          resourceCpuLimit: 500m
+          resourceMemoryLimit: 1Gi
+    exec-simple-index-component:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - simple_index_component
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.12.1'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'elasticsearch==8.11.0'\
+          \ && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef simple_index_component(\n    extracted_text: str,\n    es_endpoint:\
+          \ str\n) -> dict:\n    \"\"\"Component simplificado de indexaci\xF3n - retorna\
+          \ dict\"\"\"\n\n    # Simular indexaci\xF3n\n    status = {\n        \"\
+          indexed_at\": datetime.now().isoformat(),\n        \"content_length\": len(extracted_text),\n\
+          \        \"es_endpoint\": es_endpoint,\n        \"success\": True\n    }\n\
+          \n    print(f\"\u2705 Indexaci\xF3n simulada completada\")\n\n    return\
+          \ status\n\n"
+        image: pytorch/pytorch:2.0.1-cuda11.7-cudnn8-devel
+        resources:
+          resourceCpuLimit: 500m
+          resourceMemoryLimit: 1Gi
+pipelineInfo:
+  description: Pipeline RAG simplificado para testing - Carlos Estay (pkstaz)
+  name: rag-simple-test-v1
+root:
+  dag:
+    outputs:
+      parameters:
+        Output:
+          valueFromParameter:
+            outputParameterKey: Output
+            producerSubtask: simple-index-component
+    tasks:
+      simple-extract-component:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-simple-extract-component
+        inputs:
+          parameters:
+            bucket_name:
+              componentInputParameter: bucket_name
+            object_key:
+              componentInputParameter: object_key
+        taskInfo:
+          name: "\U0001F4C4 Simple Extract"
+      simple-index-component:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-simple-index-component
+        dependentTasks:
+        - simple-extract-component
+        inputs:
+          parameters:
+            es_endpoint:
+              componentInputParameter: es_endpoint
+            extracted_text:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: simple-extract-component
+        taskInfo:
+          name: "\U0001F50D Simple Index"
+  inputDefinitions:
+    parameters:
+      bucket_name:
+        defaultValue: raw-documents
+        isOptional: true
+        parameterType: STRING
+      es_endpoint:
+        defaultValue: elasticsearch:9200
+        isOptional: true
+        parameterType: STRING
+      object_key:
+        defaultValue: test.txt
+        isOptional: true
+        parameterType: STRING
+  outputDefinitions:
+    parameters:
+      Output:
+        parameterType: STRUCT
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.12.1

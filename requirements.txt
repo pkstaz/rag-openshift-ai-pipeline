@@ -1,0 +1,30 @@
+# RAG Pipeline Requirements
+# Author: Carlos Estay (github: pkstaz)
+# Core KFP
+kfp>=2.0.0
+
+# Document Processing
+PyPDF2==3.0.1
+python-docx==0.8.11
+chardet==5.2.0
+
+# Text Processing
+tiktoken==0.5.1
+langchain==0.0.350
+
+# ML/Embeddings
+sentence-transformers==2.2.2
+torch>=2.0.1
+numpy==1.24.3
+
+# Storage/DB
+minio==7.1.17
+elasticsearch==8.11.0
+
+# Web/API (for webhook)
+flask==2.3.3
+requests==2.31.0
+
+# Utilities
+pyyaml==6.0.1
+python-dateutil==2.8.2
