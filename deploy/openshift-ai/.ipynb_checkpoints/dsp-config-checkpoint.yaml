@@ -1,0 +1,21 @@
+apiVersion: datasciencepipelinesapplications.opendatahub.io/v1alpha1
+kind: DataSciencePipelinesApplication
+metadata:
+  labels:
+    app: rag-pipeline
+    author: Carlos Estay
+    github: pkstaz
+  name: rag-pipeline-dsp
+  namespace: rag-openshift-ai
+spec:
+  database:
+    mariaDB:
+      deploy: true
+  objectStorage:
+    minio:
+      bucket: pipeline
+      endpoint: http://minio:9000
+      s3CredentialsSecret:
+        accessKey: accesskey
+        secretKey: secretkey
+        secretName: minio-secret
