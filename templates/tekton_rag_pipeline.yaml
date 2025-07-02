@@ -103,93 +103,122 @@ spec:
       - name: bucket-name
       - name: object-key
       results:
-      - name: text-content
-        description: Extracted text content
+      - name: text-url
+        description: MinIO URL of extracted text file
       steps:
       - name: extract
         image: python:3.9
         script: |
           #!/usr/bin/env python3
-          
+          import os
+          os.system("pip install --quiet minio requests PyPDF2 python-docx chardet")
           import sys
           import tempfile
-          import os
-          
+          from minio import Minio
+          from datetime import datetime
+          import mimetypes
+
           print("🚀 Starting text extraction...")
           print(f"📊 Python version: {sys.version}")
-          
-          # Install required packages
-          print("📦 Installing dependencies...")
-          os.system("pip install --quiet minio requests")
-          
-          from minio import Minio
-          
-          try:
-              print("🔗 Connecting to MinIO...")
-              print(f"Endpoint: $(params.minio-endpoint)")
-              print(f"Bucket: $(params.bucket-name)")
-              print(f"Object: $(params.object-key)")
-              
-              # Connect to MinIO
-              minio_client = Minio(
-                  "$(params.minio-endpoint)",
-                  access_key="$(params.minio-access-key)",
-                  secret_key="$(params.minio-secret-key)",
-                  secure=True
-              )
-              
-              # Test connection
-              print("🧪 Testing MinIO connection...")
+
+          minio_endpoint = "$(params.minio-endpoint)"
+          minio_access_key = "$(params.minio-access-key)"
+          minio_secret_key = "$(params.minio-secret-key)"
+          bucket_name = "$(params.bucket-name)"
+          object_key = "$(params.object-key)"
+
+          minio_client = Minio(
+              minio_endpoint,
+              access_key=minio_access_key,
+              secret_key=minio_secret_key,
+              secure=True
+          )
+
+          def extract_text_from_pdf(pdf_path):
+              from PyPDF2 import PdfReader
+              text = ""
               try:
-                  buckets = list(minio_client.list_buckets())
-                  print(f"✅ Connected! Found {len(buckets)} buckets")
-                  for bucket in buckets:
-                      print(f"  - {bucket.name}")
+                  reader = PdfReader(pdf_path)
+                  for page in reader.pages:
+                      text += page.extract_text() or ""
               except Exception as e:
-                  print(f"⚠️ Warning: Could not list buckets: {e}")
-              
-              # Download file
-              print("📥 Downloading file...")
-              with tempfile.NamedTemporaryFile(delete=False, suffix='.txt') as temp_file:
+                  print(f"❌ Error extracting PDF text: {e}")
+              return text
+
+          def extract_text_from_docx(docx_path):
+              from docx import Document
+              text = ""
+              try:
+                  doc = Document(docx_path)
+                  for para in doc.paragraphs:
+                      text += para.text + "\n"
+              except Exception as e:
+                  print(f"❌ Error extracting DOCX text: {e}")
+              return text
+
+          def extract_text_from_txt(txt_path):
+              import chardet
+              with open(txt_path, 'rb') as f:
+                  raw = f.read()
+                  encoding = chardet.detect(raw)['encoding'] or 'utf-8'
+                  return raw.decode(encoding, errors='replace')
+
+          try:
+              print(f"🔗 Connecting to MinIO: {minio_endpoint}")
+              # Download file from MinIO
+              suffix = os.path.splitext(object_key)[-1].lower()
+              with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
                   temp_path = temp_file.name
-              
-              minio_client.fget_object("$(params.bucket-name)", "$(params.object-key)", temp_path)
+              minio_client.fget_object(bucket_name, object_key, temp_path)
               print(f"✅ File downloaded to: {temp_path}")
-              
-              # Read content
-              print("📖 Reading file content...")
-              with open(temp_path, 'r', encoding='utf-8', errors='replace') as f:
-                  content = f.read()
-              
+
+              # Detect file type and extract text
+              print(f"🔍 Detecting file type: {suffix}")
+              if suffix == '.pdf':
+                  content = extract_text_from_pdf(temp_path)
+              elif suffix == '.docx':
+                  content = extract_text_from_docx(temp_path)
+              elif suffix == '.txt':
+                  content = extract_text_from_txt(temp_path)
+              else:
+                  print(f"❌ Unsupported file type: {suffix}")
+                  content = ""
+
+              if not content or content.strip() == "":
+                  print("⚠️ No text extracted from file.")
+                  content = f"[EMPTY OR UNSUPPORTED FILE: {object_key}]"
+
+              # Save extracted text to MinIO (processed-documents/extracted-texts/)
+              extracted_bucket = "processed-documents"
+              extracted_prefix = "extracted-texts/"
+              timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+              extracted_filename = f"{extracted_prefix}{object_key}_{timestamp}.txt"
+              with tempfile.NamedTemporaryFile(delete=False, suffix='.txt') as out_file:
+                  out_file.write(content.encode('utf-8'))
+                  out_path = out_file.name
+              minio_client.fput_object(extracted_bucket, extracted_filename, out_path)
+              print(f"✅ Extracted text uploaded to MinIO: {extracted_bucket}/{extracted_filename}")
+
               # Clean up
               os.unlink(temp_path)
-              
-              print(f"✅ Text extracted: {len(content)} characters")
-              print(f"📝 Content preview: {content[:100]}...")
-              
-              # Ensure results directory exists
+              os.unlink(out_path)
+
+              # Write MinIO URL as result
+              minio_url = f"minio://{extracted_bucket}/{extracted_filename}"
               os.makedirs("/tekton/results", exist_ok=True)
-              
-              # Write result to Tekton results
-              result_path = "/tekton/results/text-content"
-              with open(result_path, "w", encoding='utf-8') as f:
-                  f.write(content)
-              
-              print(f"✅ Result written to: {result_path}")
-              print(f"📊 Result file size: {os.path.getsize(result_path)} bytes")
-                  
+              with open("/tekton/results/text-url", "w", encoding='utf-8') as f:
+                  f.write(minio_url)
+              print(f"✅ Result written to: /tekton/results/text-url")
+              print(f"📊 MinIO URL: {minio_url}")
+
           except Exception as e:
               print(f"❌ Error in extraction: {str(e)}")
               import traceback
               traceback.print_exc()
-              
-              # Write error as result
               os.makedirs("/tekton/results", exist_ok=True)
               error_msg = f"Error extracting text: {str(e)}"
-              with open("/tekton/results/text-content", "w") as f:
+              with open("/tekton/results/text-url", "w") as f:
                   f.write(error_msg)
-              
-              # Don't fail the task, just log the error
               print("⚠️ Error logged to results, continuing...")
         resources:
           requests:
@@ -214,40 +243,64 @@ spec:
     runAfter: ["extract-text"]
     taskSpec:
       params:
-      - name: text-content
-        description: Text content from previous task
+      - name: text-url
+        description: MinIO URL of extracted text file
+      - name: minio-endpoint
+      - name: minio-access-key
+      - name: minio-secret-key
       - name: chunk-size
       - name: chunk-overlap
       results:
-      - name: chunks-json
-        description: JSON with text chunks
+      - name: chunks-url
+        description: MinIO URL of chunks JSON file
       steps:
       - name: chunk
         image: python:3.9
         script: |
           #!/usr/bin/env python3
-          
-          import json
-          import sys
           import os
+          os.system("pip install --quiet minio")
           import base64
-          
+          import json
+          from minio import Minio
+          import tempfile
+          from datetime import datetime
+
           print("🚀 Starting chunking process...")
-          print(f"📊 Python version: {sys.version}")
-          
-          # Get text content from parameter (passed from previous task)
-          text_content = """$(params.text-content)"""
-          
+
+          text_url = "$(params.text-url)"
+          minio_endpoint = "$(params.minio-endpoint)"
+          minio_access_key = "$(params.minio-access-key)"
+          minio_secret_key = "$(params.minio-secret-key)"
+          chunk_size = int("$(params.chunk-size)")
+          chunk_overlap = int("$(params.chunk-overlap)")
+
+          # Download text file from MinIO
+          if not text_url.startswith("minio://"):
+              print(f"❌ Invalid text_url: {text_url}")
+              exit(1)
+          path = text_url.replace("minio://", "", 1)
+          bucket, object_name = path.split("/", 1)
+          minio_client = Minio(
+              minio_endpoint,
+              access_key=minio_access_key,
+              secret_key=minio_secret_key,
+              secure=True
+          )
+          with tempfile.NamedTemporaryFile(delete=False, suffix='.txt') as temp_file:
+              temp_path = temp_file.name
+          minio_client.fget_object(bucket, object_name, temp_path)
+          print(f"✅ Downloaded text file from MinIO: {bucket}/{object_name}")
+
+          # Read content
+          with open(temp_path, 'r', encoding='utf-8', errors='replace') as f:
+              text_content = f.read()
+          os.unlink(temp_path)
+
           print(f"📝 Received text length: {len(text_content)} characters")
           print(f"📄 Text preview: {text_content[:200]}...")
-          
+
           try:
-              chunk_size = int("$(params.chunk-size)")
-              chunk_overlap = int("$(params.chunk-overlap)")
-              
-              print(f"⚙️ Chunk size: {chunk_size}")
-              print(f"⚙️ Chunk overlap: {chunk_overlap}")
-              
               if not text_content or text_content.strip() == "":
                   print("⚠️ Empty text content received")
                   chunks = []
@@ -260,29 +313,22 @@ spec:
                       "error": True
                   }]
               else:
-                  # Chunking logic
-                  max_chars = chunk_size * 4  # Conservative estimate
+                  max_chars = chunk_size * 4
                   overlap_chars = chunk_overlap * 4
-                  
                   chunks = []
                   start = 0
                   chunk_id = 0
-                  
                   print(f"🔧 Calculated max_chars: {max_chars}, overlap_chars: {overlap_chars}")
-                  
                   while start < len(text_content):
                       end = min(start + max_chars, len(text_content))
                       chunk_text = text_content[start:end]
-                      
-                      # Find good cut point at word boundary
                       if end < len(text_content):
                           space_pos = chunk_text.rfind(' ', int(len(chunk_text) * 0.8))
                           if space_pos > 0:
                               chunk_text = chunk_text[:space_pos]
                               end = start + space_pos
-                      
                       chunk_text = chunk_text.strip()
-                      if len(chunk_text) > 10:  # Skip very small chunks
+                      if len(chunk_text) > 10:
                           chunk_data = {
                               "chunk_id": f"chunk_{chunk_id:04d}",
                               "text": chunk_text,
@@ -293,50 +339,40 @@ spec:
                           chunks.append(chunk_data)
                           chunk_id += 1
                           print(f"✅ Created chunk {chunk_id}: {len(chunk_text)} chars")
-                      
                       if end >= len(text_content):
                           break
                       start = max(end - overlap_chars, start + 1)
-              
-              # CREATE THE RESULT VARIABLE - This was missing!
               result = json.dumps(chunks, ensure_ascii=False)
               print(f"✅ Created JSON result with {len(chunks)} chunks")
-              
-              # Encode result in base64 to avoid JSON control character issues
-              result_b64 = base64.b64encode(result.encode('utf-8')).decode('ascii')
-              
-              # Write base64 encoded result
+
+              # Save chunks JSON to MinIO
+              chunks_bucket = "processed-documents"
+              chunks_prefix = "chunks/"
+              timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+              chunks_filename = f"{chunks_prefix}{object_name}_{timestamp}_chunks.json"
+              with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as out_file:
+                  out_file.write(result.encode('utf-8'))
+                  out_path = out_file.name
+              minio_client.fput_object(chunks_bucket, chunks_filename, out_path)
+              print(f"✅ Chunks JSON uploaded to MinIO: {chunks_bucket}/{chunks_filename}")
+              os.unlink(out_path)
+
+              # Write MinIO URL as result
+              minio_url = f"minio://{chunks_bucket}/{chunks_filename}"
               os.makedirs("/tekton/results", exist_ok=True)
-              result_path = "/tekton/results/chunks-json"
-              with open(result_path, "w", encoding='utf-8') as f:
-                  f.write(result_b64)
-              
-              print(f"✅ Chunks written to: {result_path}")
-              print(f"📊 Result size: {len(result)} characters")
-              print(f"📊 Base64 size: {len(result_b64)} characters")
-                  
+              with open("/tekton/results/chunks-url", "w", encoding='utf-8') as f:
+                  f.write(minio_url)
+              print(f"✅ Result written to: /tekton/results/chunks-url")
+              print(f"📊 MinIO URL: {minio_url}")
           except Exception as e:
               print(f"❌ Error in chunking: {str(e)}")
               import traceback
               traceback.print_exc()
-              
-              # Fallback chunk with base64 encoding
-              fallback = [{
-                  "chunk_id": "chunk_error_0000",
-                  "text": text_content[:1000] if text_content else "No content available",
-                  "char_count": len(text_content[:1000]) if text_content else 0,
-                  "error": True,
-                  "error_message": str(e)
-              }]
-              
-              fallback_result = json.dumps(fallback, ensure_ascii=False)
-              fallback_b64 = base64.b64encode(fallback_result.encode('utf-8')).decode('ascii')
-              
               os.makedirs("/tekton/results", exist_ok=True)
-              with open("/tekton/results/chunks-json", "w") as f:
-                  f.write(fallback_b64)
-              
-              print("⚠️ Fallback chunk created")
+              error_msg = f"Error chunking text: {str(e)}"
+              with open("/tekton/results/chunks-url", "w") as f:
+                  f.write(error_msg)
+              print("⚠️ Error logged to results, continuing...")
         resources:
           requests:
             memory: 128Mi
@@ -345,8 +381,14 @@ spec:
             memory: 256Mi
             cpu: 100m
     params:
-    - name: text-content
-      value: $(tasks.extract-text.results.text-content)
+    - name: text-url
+      value: $(tasks.extract-text.results.text-url)
+    - name: minio-endpoint
+      value: $(params.minio-endpoint)
+    - name: minio-access-key
+      value: $(params.minio-access-key)
+    - name: minio-secret-key
+      value: $(params.minio-secret-key)
     - name: chunk-size
       value: $(params.chunk-size)
     - name: chunk-overlap
@@ -356,8 +398,8 @@ spec:
     runAfter: ["chunk-text"]
     taskSpec:
       params:
-      - name: chunks-json
-        description: JSON with chunks from previous task
+      - name: chunks-url
+        description: MinIO URL of chunks JSON file
       - name: minio-endpoint
       - name: minio-access-key
       - name: minio-secret-key
@@ -370,85 +412,74 @@ spec:
         image: python:3.9
         script: |
           #!/usr/bin/env python3
-          
-          import json
-          import sys
           import os
-          import base64
+          os.system("pip install --quiet sentence-transformers torch numpy minio")
+          import json
           import tempfile
           from datetime import datetime
-          
-          print("🚀 Starting embedding generation...")
-          print(f"📊 Python version: {sys.version}")
-          
-          # Install required packages
-          print("📦 Installing dependencies...")
-          os.system("pip install --quiet sentence-transformers torch numpy minio")
-          
           from sentence_transformers import SentenceTransformer
           import torch
           from minio import Minio
-          
-          # Get chunks from parameter - decode base64
-          chunks_json_b64 = "$(params.chunks-json)"
-          
-          print(f"📝 Received base64 chunks length: {len(chunks_json_b64)} characters")
-          
+          import base64
+
+          print("🚀 Starting embedding generation...")
+
+          # Get chunks from MinIO
+          chunks_url = "$(params.chunks-url)"
+          minio_endpoint = "$(params.minio-endpoint)"
+          minio_access_key = "$(params.minio-access-key)"
+          minio_secret_key = "$(params.minio-secret-key)"
+
+          if not chunks_url.startswith("minio://"):
+              print(f"❌ Invalid chunks_url: {chunks_url}")
+              exit(1)
+          path = chunks_url.replace("minio://", "", 1)
+          bucket, object_name = path.split("/", 1)
+          minio_client = Minio(
+              minio_endpoint,
+              access_key=minio_access_key,
+              secret_key=minio_secret_key,
+              secure=True
+          )
+          with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_file:
+              temp_path = temp_file.name
+          minio_client.fget_object(bucket, object_name, temp_path)
+          print(f"✅ Downloaded chunks JSON from MinIO: {bucket}/{object_name}")
+
+          with open(temp_path, 'r', encoding='utf-8') as f:
+              chunks = json.load(f)
+          os.unlink(temp_path)
+
+          print(f"📊 Processing {len(chunks)} chunks")
+
           try:
-              # Decode from base64
-              chunks_json = base64.b64decode(chunks_json_b64).decode('utf-8')
-              print(f"📝 Decoded JSON length: {len(chunks_json)} characters")
+              # Load model with CPU only to avoid GPU issues
+              device = 'cpu'
+              print(f"🧠 Loading model on {device}...")
+              model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', device=device)
+              print(f"✅ Model loaded successfully")
               
-              chunks = json.loads(chunks_json)
-              print(f"📊 Processing {len(chunks)} chunks")
+              # Generate embeddings
+              texts = [chunk['text'] for chunk in chunks]
+              print(f"🔄 Generating embeddings for {len(texts)} texts...")
               
-              # Connect to MinIO for result storage
-              print("🔗 Connecting to MinIO for result storage...")
-              minio_client = Minio(
-                  "$(params.minio-endpoint)",
-                  access_key="$(params.minio-access-key)",
-                  secret_key="$(params.minio-secret-key)",
-                  secure=True
+              embeddings = model.encode(
+                  texts, 
+                  convert_to_numpy=True, 
+                  normalize_embeddings=True,
+                  show_progress_bar=True,
+                  batch_size=8  # Small batch size to avoid memory issues
               )
               
-              result_status = "success"
+              # Add embeddings to chunks
+              for i, chunk in enumerate(chunks):
+                  chunk['embedding'] = embeddings[i].tolist()
+                  chunk['embedding_dim'] = len(embeddings[i])
+                  chunk['embedding_model'] = 'sentence-transformers/all-MiniLM-L6-v2'
               
-              if not chunks:
-                  print("⚠️ No chunks to process")
-                  result = json.dumps([])
-                  result_status = "no_chunks"
-              elif any(chunk.get('error', False) for chunk in chunks):
-                  print("⚠️ Error chunks detected, skipping embedding generation")
-                  result = chunks_json  # Pass through the error chunks
-                  result_status = "error_chunks"
-              else:
-                  # Load model with CPU only to avoid GPU issues
-                  device = 'cpu'
-                  print(f"🧠 Loading model on {device}...")
-                  model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', device=device)
-                  print(f"✅ Model loaded successfully")
-                  
-                  # Generate embeddings
-                  texts = [chunk['text'] for chunk in chunks]
-                  print(f"🔄 Generating embeddings for {len(texts)} texts...")
-                  
-                  embeddings = model.encode(
-                      texts, 
-                      convert_to_numpy=True, 
-                      normalize_embeddings=True,
-                      show_progress_bar=True,
-                      batch_size=8  # Small batch size to avoid memory issues
-                  )
-                  
-                  # Add embeddings to chunks
-                  for i, chunk in enumerate(chunks):
-                      chunk['embedding'] = embeddings[i].tolist()
-                      chunk['embedding_dim'] = len(embeddings[i])
-                      chunk['embedding_model'] = 'sentence-transformers/all-MiniLM-L6-v2'
-                  
-                  result = json.dumps(chunks, ensure_ascii=False, indent=2)
-                  print(f"🎉 Successfully generated embeddings for {len(chunks)} chunks")
-              
+              result = json.dumps(chunks, ensure_ascii=False, indent=2)
+              print(f"🎉 Successfully generated embeddings for {len(chunks)} chunks")
+          
               # Save result to MinIO instead of Tekton results (too large)
               print(f"📤 Uploading result to MinIO...")
               print(f"📊 Result size: {len(result)} characters ({len(result.encode('utf-8'))} bytes)")
@@ -472,7 +503,7 @@ spec:
                   
                   # Create small status result for Tekton
                   status_result = {
-                      "status": result_status,
+                      "status": "success",
                       "chunks_processed": len(chunks),
                       "result_location": f"minio://processed-documents/{result_filename}",
                       "result_size_bytes": len(result.encode('utf-8')),
@@ -519,8 +550,8 @@ spec:
             memory: 2Gi
             cpu: 500m
     params:
-    - name: chunks-json
-      value: $(tasks.chunk-text.results.chunks-json)
+    - name: chunks-url
+      value: $(tasks.chunk-text.results.chunks-url)
     - name: minio-endpoint
       value: $(params.minio-endpoint)
     - name: minio-access-key

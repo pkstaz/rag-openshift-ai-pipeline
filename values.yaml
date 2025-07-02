@@ -4,7 +4,8 @@ minioEndpoint: my-minio-api-rag-openshift-ai.apps.cluster-2gbhp.2gbhp.sandbox112
 minioAccessKey: minio
 minioSecretKey: minio123
 bucketName: raw-documents
-objectKey: test-document-openshift-ai.txt
+# objectKey: test-document-openshift-ai.txt
+objectKey: 013-2019.pdf
 chunkSize: "512"
 chunkOverlap: "50"
 elasticsearchEndpoint: "https://elasticsearch-es-default:9200"
