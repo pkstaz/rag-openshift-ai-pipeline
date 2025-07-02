@@ -19,9 +19,82 @@ spec:
     default: "{{ .Values.chunkSize }}"
   - name: chunk-overlap
     default: "{{ .Values.chunkOverlap }}"
+  - name: elasticsearch-endpoint
+    default: "{{ .Values.elasticsearchEndpoint }}"
+  - name: elasticsearch-username
+    default: "{{ .Values.elasticsearchUsername }}"
+  - name: elasticsearch-password
+    default: "{{ .Values.elasticsearchPassword }}"
 
   tasks:
+  - name: validate-connections
+    taskSpec:
+      params:
+      - name: minio-endpoint
+      - name: minio-access-key
+      - name: minio-secret-key
+      - name: elasticsearch-endpoint
+      - name: elasticsearch-username
+      - name: elasticsearch-password
+      steps:
+      - name: validate
+        image: python:3.9
+        script: |
+          #!/usr/bin/env python3
+          import os
+          os.system("pip install --quiet minio requests")
+          from minio import Minio
+          import requests
+
+          print("🔎 Validating connection to MinIO...")
+          minio_endpoint = "$(params.minio-endpoint)"
+          minio_access_key = "$(params.minio-access-key)"
+          minio_secret_key = "$(params.minio-secret-key)"
+          try:
+              minio_client = Minio(
+                  minio_endpoint,
+                  access_key=minio_access_key,
+                  secret_key=minio_secret_key,
+                  secure=True
+              )
+              buckets = minio_client.list_buckets()
+              print(f"✅ Connection successful to MinIO. Buckets: {[b.name for b in buckets]}")
+          except Exception as e:
+              print(f"❌ ERROR connecting to MinIO: {e}")
+              exit(1)
+
+          print("🔎 Validating connection to Elasticsearch...")
+          es_endpoint = "$(params.elasticsearch-endpoint)"
+          es_user = "$(params.elasticsearch-username)"
+          es_pass = "$(params.elasticsearch-password)"
+          print(f"[DEBUG] Actual es_endpoint value: {es_endpoint}")
+          if es_user and es_pass:
+              auth = (es_user, es_pass)
+          else:
+              auth = None
+          try:
+              resp = requests.get(es_endpoint, auth=auth, timeout=5, verify=False)
+              print(f"✅ Connection successful to Elasticsearch. Status: {resp.status_code}")
+              print(f"Response: {resp.text[:200]}")
+          except Exception as e:
+              print(f"❌ ERROR connecting to Elasticsearch: {e}")
+              exit(1)
+    params:
+    - name: minio-endpoint
+      value: {{ .Values.minioEndpoint }}
+    - name: minio-access-key
+      value: {{ .Values.minioAccessKey }}
+    - name: minio-secret-key
+      value: {{ .Values.minioSecretKey }}
+    - name: elasticsearch-endpoint
+      value: {{ .Values.elasticsearchEndpoint | quote }}
+    - name: elasticsearch-username
+      value: {{ .Values.elasticsearchUsername | quote }}
+    - name: elasticsearch-password
+      value: {{ .Values.elasticsearchPassword | quote }}
+
   - name: extract-text
+    runAfter: ["validate-connections"]
     taskSpec:
       params:
       - name: minio-endpoint
@@ -456,3 +529,122 @@ spec:
       value: $(params.minio-secret-key)
     - name: object-key
       value: $(params.object-key)
+
+  - name: index-elasticsearch
+    runAfter: ["generate-embeddings"]
+    taskSpec:
+      params:
+      - name: minio-endpoint
+      - name: minio-access-key
+      - name: minio-secret-key
+      - name: embeddings-status
+        description: JSON de status de embeddings
+      - name: elasticsearch-endpoint
+        description: Endpoint de Elasticsearch
+      - name: elasticsearch-username
+        description: Usuario de Elasticsearch
+      - name: elasticsearch-password
+        description: Password de Elasticsearch
+      steps:
+      - name: index
+        image: python:3.9
+        script: |
+          #!/usr/bin/env python3
+          import os
+          os.system("pip install --quiet minio requests")
+          import json
+          import tempfile
+          from minio import Minio
+          import requests
+
+          print("🚀 Starting indexing in Elasticsearch...")
+
+          # Parámetros
+          minio_endpoint = "$(params.minio-endpoint)"
+          minio_access_key = "$(params.minio-access-key)"
+          minio_secret_key = "$(params.minio-secret-key)"
+          embeddings_status = '$(params.embeddings-status)'
+          es_endpoint = "$(params.elasticsearch-endpoint)"
+          es_user = "$(params.elasticsearch-username)"
+          es_pass = "$(params.elasticsearch-password)"
+
+          print(f"[DEBUG] embeddings_status recibido: {embeddings_status}")
+          try:
+              status_obj = json.loads(embeddings_status)
+              embeddings_location = status_obj.get('result_location', '')
+          except Exception as e:
+              print(f"❌ ERROR: No se pudo parsear embeddings_status: {e}")
+              exit(1)
+
+          print(f"[DEBUG] embeddings_location extraído: {embeddings_location}")
+          if not embeddings_location.startswith("minio://"):
+              print(f"❌ ERROR: embeddings_location no comienza con minio://. Valor recibido: {embeddings_location}")
+              exit(1)
+
+          # Parsear bucket y objeto de la URL minio://bucket/objeto
+          path = embeddings_location.replace("minio://", "", 1)
+          bucket, object_name = path.split("/", 1)
+
+          # Definir auth para Elasticsearch
+          if es_user and es_pass:
+              auth = (es_user, es_pass)
+          else:
+              auth = None
+
+          # Descargar archivo de embeddings desde MinIO
+          minio_client = Minio(
+              minio_endpoint,
+              access_key=minio_access_key,
+              secret_key=minio_secret_key,
+              secure=True
+          )
+          with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_file:
+              temp_path = temp_file.name
+          minio_client.fget_object(bucket, object_name, temp_path)
+          print(f"✅ Embeddings descargados: {temp_path}")
+
+          # Leer embeddings
+          with open(temp_path, 'r', encoding='utf-8') as f:
+              embeddings = json.load(f)
+
+          # Indexar en Elasticsearch
+          headers = {"Content-Type": "application/json"}
+          if es_user and es_pass:
+              auth = (es_user, es_pass)
+          else:
+              auth = None
+
+          index_name = "rag-documents"
+          success = 0
+          fail = 0
+          for chunk in embeddings:
+              doc_id = chunk.get("chunk_id")
+              resp = requests.put(
+                  f"{es_endpoint}/{index_name}/_doc/{doc_id}",
+                  headers=headers,
+                  data=json.dumps(chunk, ensure_ascii=False),
+                  auth=auth,
+                  verify=False
+              )
+              if resp.status_code in (200, 201):
+                  print(f"✅ Indexado: {doc_id}")
+                  success += 1
+              else:
+                  print(f"❌ Error indexando {doc_id}: {resp.text}")
+                  fail += 1
+          print(f"🎉 Indexación completa. Exitosos: {success}, Fallidos: {fail}")
+    params:
+    - name: minio-endpoint
+      value: {{ .Values.minioEndpoint }}
+    - name: minio-access-key
+      value: {{ .Values.minioAccessKey }}
+    - name: minio-secret-key
+      value: {{ .Values.minioSecretKey }}
+    - name: embeddings-status
+      value: $(tasks.generate-embeddings.results.status)
+    - name: elasticsearch-endpoint
+      value: {{ .Values.elasticsearchEndpoint | quote }}
+    - name: elasticsearch-username
+      value: {{ .Values.elasticsearchUsername | quote }}
+    - name: elasticsearch-password
+      value: {{ .Values.elasticsearchPassword | quote }}
