@@ -1,0 +1,9 @@
+pipelineName: rag-tekton-pipeline
+namespace: rag-openshift-ai
+minioEndpoint: https://my-minio-api-rag-openshift-ai.apps.cluster-2gbhp.2gbhp.sandbox1120.opentlc.com
+minioAccessKey: minio
+minioSecretKey: minio123
+bucketName: raw-documents
+objectKey: test-document-openshift-ai.txt
+chunkSize: "512"
+chunkOverlap: "50" 

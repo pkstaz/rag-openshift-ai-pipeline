@@ -1,0 +1,4 @@
+apiVersion: v2
+name: rag-tekton-pipeline
+description: Helm chart para desplegar un pipeline Tekton de RAG en OpenShift AI
+version: 0.1.0 
